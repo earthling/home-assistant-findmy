@@ -59,6 +59,7 @@ device_updates = {}
 client = mqtt.Client("ha-client")
 
 def connect_broker():
+    print(f"Connect to '{mqtt_broker_ip}'")
     client.username_pw_set(mqtt_client_username, mqtt_client_password)
     client.connect(host=mqtt_broker_ip, port=mqtt_broker_port)
     client.loop_start()
@@ -117,7 +118,7 @@ def send_data_items(force_sync):
             address = device['address']
             accuracy = math.sqrt(
                 device['location']['horizontalAccuracy'] ** 2 + device['location']['verticalAccuracy'] ** 2)
-            location_name = get_location_name((latitude, longitude))
+            # location_name = get_location_name((latitude, longitude))
             lastUpdate = device['location']['timeStamp']
 
         device_id = get_device_id(device_name)
@@ -139,15 +140,14 @@ def send_data_items(force_sync):
                 "name": device_name
             },
             "source_type": source_type,
-            "payload_home": "home",
-            "payload_not_home": "not_home"
+            "payload_reset": "unknown"
         }
         device_attributes = {
             "latitude": latitude,
             "longitude": longitude,
             "gps_accuracy": accuracy,
             "address": address,
-            "batteryStatus": battery_status,
+            "battery_level": battery_status,
             "last_update_timestamp": lastUpdate,
             "last_update": get_time(lastUpdate),
             "provider": "FindMy (muehlt/home-assistant-findmy)"
@@ -155,7 +155,7 @@ def send_data_items(force_sync):
 
         client.publish(device_topic + "config", json.dumps(device_config))
         client.publish(device_topic + "attributes", json.dumps(device_attributes))
-        client.publish(device_topic + "state", location_name)
+        client.publish(device_topic + "state", "unknown")
 
 
 def send_data_devices(force_sync):
@@ -172,7 +172,7 @@ def send_data_devices(force_sync):
             address = device['address']
             accuracy = math.sqrt(
                 device['location']['horizontalAccuracy'] ** 2 + device['location']['verticalAccuracy'] ** 2)
-            location_name = get_location_name((latitude, longitude))
+            # location_name = get_location_name((latitude, longitude))
             lastUpdate = device['location']['timeStamp']
 
         device_id = get_device_id(device_name)
@@ -186,16 +186,15 @@ def send_data_devices(force_sync):
         device_topic = f"homeassistant/device_tracker/{device_id}/"
         device_config = {
             "unique_id": device_id,
-            "state_topic": device_topic + "state",
             "json_attributes_topic": device_topic + "attributes",
+            "state_topic": device_topic + "state",
             "device": {
                 "identifiers": device_id,
                 "manufacturer": "Apple",
                 "name": device_name
             },
             "source_type": source_type,
-            "payload_home": "home",
-            "payload_not_home": "not_home"
+            "payload_reset": "unknown"
         }
         device_attributes = {
             "latitude": latitude,
@@ -211,7 +210,7 @@ def send_data_devices(force_sync):
 
         client.publish(device_topic + "config", json.dumps(device_config))
         client.publish(device_topic + "attributes", json.dumps(device_attributes))
-        client.publish(device_topic + "state", location_name)
+        client.publish(device_topic + "state", "unknown")
 
 
 def scan_cache(privacy, force_sync):
@@ -276,11 +275,11 @@ def set_known_locations(locations):
     known_locations = _known_locations
 
 
-@click.command("home-assistant-findmy", no_args_is_help=True)
+@click.command("home-assistant-findmy", no_args_is_help=False)
 @click.option('--locations', '-l',
               type=click.Path(),
-              callback=validate_param_locations,
-              required=True,
+    #          callback=validate_param_locations,
+              required=False,
               help='Path to the known locations JSON configuration file')
 @click.option('--privacy', '-p',
               is_flag=True,
@@ -319,7 +318,7 @@ def main(locations, privacy, force_sync, ip, port, username, password, scan_inte
     findmy_file_scan_interval = scan_interval
 
     connect_broker()
-    set_known_locations(locations)
+    # set_known_locations(locations)
     scan_cache(privacy, force_sync)
 
 
