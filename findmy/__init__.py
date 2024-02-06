@@ -1,6 +1,6 @@
 #!/usr/bin/python3
-
-# .                                       .           .                   .          
+import typing
+# .                                       .           .                   .
 # |                                 o     |           |        ,- o       |          
 # |-. ,-. ;-.-. ,-. --- ,-: ,-. ,-. . ,-. |-  ,-: ;-. |-  ---  |  . ;-. ,-| ;-.-. . .
 # | | | | | | | |-'     | | `-. `-. | `-. |   | | | | |        |- | | | | | | | | | |
@@ -21,7 +21,7 @@
 #
 # DISCLAIMER:   This script is provided as-is, without any warranty. Use at your own risk.
 #               This code is not tested and should only be used for experimental purposes.
-#               Loading the FindMy cache files is not inteded by Apple and might cause problems.
+#               Loading the FindMy cache files is not intended by Apple and might cause problems.
 #
 # LICENSE:      See the LICENSE.md file of the original authors' repository
 #               (https://github.com/muehlt/home-assistant-findmy).
@@ -43,26 +43,16 @@ load_dotenv()
 
 DEFAULT_TOLERANCE = 70  # meters
 
-(mqtt_broker_ip,
- mqtt_broker_port,
- mqtt_client_username,
- mqtt_client_password,
- findmy_file_scan_interval) = (None,) * 5
-
-cache_file_location = os.path.expanduser('~') + '/Library/Caches/com.apple.findmy.fmipcore/'
-cache_file_location_items = cache_file_location + 'Items.data'
-cache_file_location_devices = cache_file_location + 'Devices.data'
-
 known_locations = {}
 device_updates = {}
 
 client = mqtt.Client("ha-client")
 
 
-def connect_broker():
-    client.username_pw_set(mqtt_client_username, mqtt_client_password)
+def connect_broker(username: str, password: str, broker_ip: str, broker_port: int):
+    client.username_pw_set(username, password)
     client.reconnect_delay_set(1, 256)
-    client.connect(host=mqtt_broker_ip, port=mqtt_broker_port)
+    client.connect(host=broker_ip, port=broker_port)
     client.loop_start()
 
 
@@ -98,6 +88,9 @@ def get_source_type(apple_position_type):
 
 
 def get_location_name(pos):
+    if len(known_locations) == 0:
+        return "unknown"
+
     for name, location in known_locations.items():
         tolerance = get_lat_lng_approx(location['tolerance'] or DEFAULT_TOLERANCE)
         if (math.isclose(location['latitude'], pos[0], abs_tol=tolerance) and
@@ -106,124 +99,85 @@ def get_location_name(pos):
     return "not_home"
 
 
-def send_data_items(force_sync):
-    for device in load_data(cache_file_location_items):
-        device_name = device['name']
-        battery_status = device['batteryStatus']
-        source_type = get_source_type(device.get('location').get('positionType') if device.get('location') else None)
+class Device(object):
+    def __init__(self, device: typing.Dict):
+        self.name = device['name']
+        self.battery_level = device['batteryLevel'] if 'batteryLevel' in device else None
+        self.battery_status = device['batteryStatus']
+        self.source_type = self.latitude = self.longitude = \
+            self.address = self.accuracy = self.location_name = self.last_update = None
 
-        location_name = address = latitude = longitude = accuracy = last_update = "unknown"
-        if device['location'] is not None:
-            latitude = device['location']['latitude']
-            longitude = device['location']['longitude']
-            address = device['address']
-            accuracy = math.sqrt(
-                device['location']['horizontalAccuracy'] ** 2 + device['location']['verticalAccuracy'] ** 2)
-            location_name = get_location_name((latitude, longitude))
-            last_update = device['location']['timeStamp']
+        location = device.get('location')
+        if location is not None:
+            self.source_type = get_source_type(location.get('positionType'))
+            self.latitude = location['latitude']
+            self.longitude = location['longitude']
+            self.address = device['address']
+            self.accuracy = math.sqrt(location['horizontalAccuracy'] ** 2 + location['verticalAccuracy'] ** 2)
+            self.location_name = get_location_name((self.latitude, self.longitude))
+            self.last_update = location['timeStamp']
 
-        device_id = get_device_id(device_name)
-        updates_identifier = f"{device_name} ({device_id})"
+        self.id = get_device_id(self.name)
+        self.updates_identifier = f"{self.name} ({self.id})"
 
-        device_update = device_updates.get(updates_identifier)
-        if not force_sync and device_update and len(device_update) > 0 and device_update[0] == last_update:
+
+def send_location_data(force_sync, findmy_data_file):
+    for device_data in load_data(findmy_data_file):
+        device = Device(device_data)
+        device_update = device_updates.get(device.updates_identifier)
+        if not force_sync and device_update and len(device_update) > 0 and device_update[0] == device.last_update:
             continue
 
-        device_updates[updates_identifier] = (last_update, location_name)
-        device_topic = f"homeassistant/device_tracker/{device_id}/"
-        device_config = {
-            "unique_id": device_id,
-            "state_topic": device_topic + "state",
-            "json_attributes_topic": device_topic + "attributes",
-            "device": {
-                "identifiers": device_id,
-                "manufacturer": "Apple",
-                "name": device_name
-            },
-            "source_type": source_type,
-            "payload_home": "home",
-            "payload_not_home": "not_home"
-        }
-        device_attributes = {
-            "latitude": latitude,
-            "longitude": longitude,
-            "gps_accuracy": accuracy,
-            "address": address,
-            "batteryStatus": battery_status,
-            "last_update_timestamp": last_update,
-            "last_update": get_time(last_update),
-            "provider": "FindMy (muehlt/home-assistant-findmy)"
-        }
-
-        client.publish(device_topic + "config", json.dumps(device_config))
-        client.publish(device_topic + "attributes", json.dumps(device_attributes))
-        client.publish(device_topic + "state", location_name)
+        device_updates[device.updates_identifier] = (device.last_update, device.location_name)
+        publish_to_mqtt(device)
 
 
-def send_data_devices(force_sync):
-    for device in load_data(cache_file_location_devices):
-        device_name = device['name']
-        battery_status = device['batteryStatus']
-        battery_level = device['batteryLevel']
-        source_type = get_source_type(device.get('location').get('positionType') if device.get('location') else None)
+def publish_to_mqtt(device):
+    device_topic = f"homeassistant/device_tracker/{device.id}/"
+    device_config = {
+        "unique_id": device.id,
+        "state_topic": device_topic + "state",
+        "json_attributes_topic": device_topic + "attributes",
+        "device": {
+            "identifiers": device.id,
+            "manufacturer": "Apple",
+            "name": device.name
+        },
+        "source_type": device.source_type,
+        "payload_home": "home",
+        "payload_not_home": "not_home",
+        "payload_reset": "unknown"
+    }
+    device_attributes = {
+        "latitude": device.latitude,
+        "longitude": device.longitude,
+        "gps_accuracy": device.accuracy,
+        "address": device.address,
+        "battery_status": device.battery_status,
+        "last_update_timestamp": device.last_update,
+        "last_update": get_time(device.last_update),
+        "provider": "FindMy (muehlt/home-assistant-findmy)"
+    }
 
-        location_name = address = latitude = longitude = accuracy = last_update = "unknown"
-        if device['location'] is not None:
-            latitude = device['location']['latitude']
-            longitude = device['location']['longitude']
-            address = device['address']
-            accuracy = math.sqrt(
-                device['location']['horizontalAccuracy'] ** 2 + device['location']['verticalAccuracy'] ** 2)
-            location_name = get_location_name((latitude, longitude))
-            last_update = device['location']['timeStamp']
+    if device.battery_level:
+        device_attributes["battery_level"] = device.battery_level
 
-        device_id = get_device_id(device_name)
-        updates_identifier = f"{device_name} ({device_id})"
-
-        device_update = device_updates.get(updates_identifier)
-        if not force_sync and device_update and len(device_update) > 0 and device_update[0] == last_update:
-            continue
-
-        device_updates[updates_identifier] = (last_update, location_name)
-        device_topic = f"homeassistant/device_tracker/{device_id}/"
-        device_config = {
-            "unique_id": device_id,
-            "state_topic": device_topic + "state",
-            "json_attributes_topic": device_topic + "attributes",
-            "device": {
-                "identifiers": device_id,
-                "manufacturer": "Apple",
-                "name": device_name
-            },
-            "source_type": source_type,
-            "payload_home": "home",
-            "payload_not_home": "not_home"
-        }
-        device_attributes = {
-            "latitude": latitude,
-            "longitude": longitude,
-            "gps_accuracy": accuracy,
-            "address": address,
-            "battery_status": battery_status,
-            "battery_level": battery_level,
-            "last_update_timestamp": last_update,
-            "last_update": get_time(last_update),
-            "provider": "FindMy (muehlt/home-assistant-findmy)"
-        }
-
-        client.publish(device_topic + "config", json.dumps(device_config))
-        client.publish(device_topic + "attributes", json.dumps(device_attributes))
-        client.publish(device_topic + "state", location_name)
+    client.publish(device_topic + "config", json.dumps(device_config))
+    client.publish(device_topic + "attributes", json.dumps(device_attributes))
+    client.publish(device_topic + "state", device.location_name)
 
 
-def scan_cache(privacy, force_sync):
+def scan_cache(privacy, force_sync, scan_interval, findmy_data_dir):
+    cache_file_location_items = findmy_data_dir + 'Items.data'
+    cache_file_location_devices = findmy_data_dir + 'Devices.data'
+
     console = Console()
     with console.status(
             f"[bold green]Synchronizing {len(device_updates)} devices "
             f"and {len(known_locations)} known locations") as status:
         while True:
-            send_data_items(force_sync)
-            send_data_devices(force_sync)
+            send_location_data(force_sync, cache_file_location_items)
+            send_location_data(force_sync, cache_file_location_devices)
 
             os.system('clear')
 
@@ -239,12 +193,12 @@ def scan_cache(privacy, force_sync):
             status.update(
                 f"[bold green]Synchronizing {len(device_updates)} devices and {len(known_locations)} known locations")
 
-            time.sleep(findmy_file_scan_interval)
+            time.sleep(scan_interval)
 
 
 def validate_param_locations(_, __, path):
-    if path is None:
-        raise click.BadParameter('Please provide a valid path to the known locations config file.')
+    if not path:
+        return {}
 
     if not os.path.isfile(path):
         raise click.BadParameter('The provided path is not a file.')
@@ -283,7 +237,7 @@ def set_known_locations(locations):
 @click.option('--locations', '-l',
               type=click.Path(),
               callback=validate_param_locations,
-              required=True,
+              required=False,
               help='Path to the known locations JSON configuration file')
 @click.option('--privacy', '-p',
               is_flag=True,
@@ -312,18 +266,16 @@ def set_known_locations(locations):
               default=5,
               type=int,
               help="File scan interval in seconds.")
-def main(locations, privacy, force_sync, ip, port, username, password, scan_interval):
-    global mqtt_broker_ip, mqtt_broker_port, mqtt_client_username, mqtt_client_password, findmy_file_scan_interval
-
-    mqtt_broker_ip = ip
-    mqtt_broker_port = port
-    mqtt_client_username = username
-    mqtt_client_password = password
-    findmy_file_scan_interval = scan_interval
-
-    connect_broker()
-    set_known_locations(locations)
-    scan_cache(privacy, force_sync)
+@click.option('--findmy-data-dir', '-f',
+              type=click.Path(),
+              default=os.path.expanduser('~') + '/Library/Caches/com.apple.findmy.fmipcore/',
+              required=False,
+              help='Path to findmy data (for testing)')
+def main(locations, privacy, force_sync, ip, port, username, password, scan_interval, findmy_data_dir):
+    connect_broker(username, password, ip, port)
+    if locations:
+        set_known_locations(locations)
+    scan_cache(privacy, force_sync, scan_interval, findmy_data_dir)
 
 
 if __name__ == '__main__':
