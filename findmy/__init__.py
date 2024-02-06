@@ -58,14 +58,16 @@ device_updates = {}
 
 client = mqtt.Client("ha-client")
 
+
 def connect_broker():
     client.username_pw_set(mqtt_client_username, mqtt_client_password)
+    client.reconnect_delay_set(1, 256)
     client.connect(host=mqtt_broker_ip, port=mqtt_broker_port)
     client.loop_start()
 
 
 def get_time(timestamp):
-    if (type(timestamp) is not int):
+    if type(timestamp) is not int:
         return "unknown"
     return str(datetime.fromtimestamp(timestamp / 1000))
 
@@ -83,7 +85,7 @@ def load_data(data_file):
 
 def get_device_id(name):
     device_id = unidecode(re.sub(r'[\s-]', '_', name).lower())
-    return re.sub('[_]+', '_', re.sub('[^0-9a-zA-Z_-]+', '', device_id))
+    return re.sub(r'_+', '_', re.sub('[^0-9a-zA-Z_-]+', '', device_id))
 
 
 def get_source_type(apple_position_type):
@@ -110,7 +112,7 @@ def send_data_items(force_sync):
         battery_status = device['batteryStatus']
         source_type = get_source_type(device.get('location').get('positionType') if device.get('location') else None)
 
-        location_name = address = latitude = longitude = accuracy = lastUpdate = "unknown"
+        location_name = address = latitude = longitude = accuracy = last_update = "unknown"
         if device['location'] is not None:
             latitude = device['location']['latitude']
             longitude = device['location']['longitude']
@@ -118,16 +120,16 @@ def send_data_items(force_sync):
             accuracy = math.sqrt(
                 device['location']['horizontalAccuracy'] ** 2 + device['location']['verticalAccuracy'] ** 2)
             location_name = get_location_name((latitude, longitude))
-            lastUpdate = device['location']['timeStamp']
+            last_update = device['location']['timeStamp']
 
         device_id = get_device_id(device_name)
         updates_identifier = f"{device_name} ({device_id})"
 
         device_update = device_updates.get(updates_identifier)
-        if not force_sync and device_update and len(device_update) > 0 and device_update[0] == lastUpdate:
+        if not force_sync and device_update and len(device_update) > 0 and device_update[0] == last_update:
             continue
 
-        device_updates[updates_identifier] = (lastUpdate, location_name)
+        device_updates[updates_identifier] = (last_update, location_name)
         device_topic = f"homeassistant/device_tracker/{device_id}/"
         device_config = {
             "unique_id": device_id,
@@ -148,8 +150,8 @@ def send_data_items(force_sync):
             "gps_accuracy": accuracy,
             "address": address,
             "batteryStatus": battery_status,
-            "last_update_timestamp": lastUpdate,
-            "last_update": get_time(lastUpdate),
+            "last_update_timestamp": last_update,
+            "last_update": get_time(last_update),
             "provider": "FindMy (muehlt/home-assistant-findmy)"
         }
 
@@ -162,10 +164,10 @@ def send_data_devices(force_sync):
     for device in load_data(cache_file_location_devices):
         device_name = device['name']
         battery_status = device['batteryStatus']
-        battery_sevel = device['batteryLevel']
+        battery_level = device['batteryLevel']
         source_type = get_source_type(device.get('location').get('positionType') if device.get('location') else None)
 
-        location_name = address = latitude = longitude = accuracy = lastUpdate = "unknown"
+        location_name = address = latitude = longitude = accuracy = last_update = "unknown"
         if device['location'] is not None:
             latitude = device['location']['latitude']
             longitude = device['location']['longitude']
@@ -173,16 +175,16 @@ def send_data_devices(force_sync):
             accuracy = math.sqrt(
                 device['location']['horizontalAccuracy'] ** 2 + device['location']['verticalAccuracy'] ** 2)
             location_name = get_location_name((latitude, longitude))
-            lastUpdate = device['location']['timeStamp']
+            last_update = device['location']['timeStamp']
 
         device_id = get_device_id(device_name)
         updates_identifier = f"{device_name} ({device_id})"
 
         device_update = device_updates.get(updates_identifier)
-        if not force_sync and device_update and len(device_update) > 0 and device_update[0] == lastUpdate:
+        if not force_sync and device_update and len(device_update) > 0 and device_update[0] == last_update:
             continue
 
-        device_updates[updates_identifier] = (lastUpdate, location_name)
+        device_updates[updates_identifier] = (last_update, location_name)
         device_topic = f"homeassistant/device_tracker/{device_id}/"
         device_config = {
             "unique_id": device_id,
@@ -203,9 +205,9 @@ def send_data_devices(force_sync):
             "gps_accuracy": accuracy,
             "address": address,
             "battery_status": battery_status,
-            "battery_level": battery_sevel,
-            "last_update_timestamp": lastUpdate,
-            "last_update": get_time(lastUpdate),
+            "battery_level": battery_level,
+            "last_update_timestamp": last_update,
+            "last_update": get_time(last_update),
             "provider": "FindMy (muehlt/home-assistant-findmy)"
         }
 
@@ -217,7 +219,8 @@ def send_data_devices(force_sync):
 def scan_cache(privacy, force_sync):
     console = Console()
     with console.status(
-            f"[bold green]Synchronizing {len(device_updates)} devices and {len(known_locations)} known locations") as status:
+            f"[bold green]Synchronizing {len(device_updates)} devices "
+            f"and {len(known_locations)} known locations") as status:
         while True:
             send_data_items(force_sync)
             send_data_devices(force_sync)
