@@ -24,7 +24,7 @@
 #
 # LICENSE:      See the LICENSE.md file of the original authors' repository
 #               (https://github.com/muehlt/home-assistant-findmy).
-
+import logging
 from datetime import datetime
 import math
 import re
@@ -35,11 +35,17 @@ import os
 import json
 import typing
 
+import watchdog.events
 from unidecode import unidecode
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEvent
 
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S', filename='/tmp/findmy.log')
 load_dotenv()
 
 device_updates = {}
@@ -105,15 +111,20 @@ class Device(object):
 def send_location_data(force_sync, findmy_data_file):
     for device_data in load_data(findmy_data_file):
         device = Device(device_data)
-        device_update = device_updates.get(device.updates_identifier)
-        if not force_sync and device_update and len(device_update) > 0 and device_update[0] == device.last_update:
+        previous_update = device_updates.get(device.updates_identifier)
+
+        if not device.last_update:
+            if previous_update:
+                del device_updates[device.updates_identifier]
             continue
 
-        device_updates[device.updates_identifier] = (device.last_update, device.location_name)
-        publish_to_mqtt(device)
+        if force_sync or not previous_update or previous_update.last_update != device.last_update:
+            device_updates[device.updates_identifier] = device
+            publish_to_mqtt(device)
 
 
 def publish_to_mqtt(device):
+    logging.debug("Publishing device: %s", device.id)
     device_topic = f"homeassistant/device_tracker/{device.id}/"
     device_config = {
         "unique_id": device.id,
@@ -148,16 +159,21 @@ def publish_to_mqtt(device):
     client.publish(device_topic + "state", device.location_name)
 
 
-def scan_cache(privacy, force_sync, scan_interval, findmy_data_dir):
-    cache_file_location_items = findmy_data_dir + 'Items.data'
-    cache_file_location_devices = findmy_data_dir + 'Devices.data'
+class FindMyFileHandler(watchdog.events.PatternMatchingEventHandler):
+    def __init__(self, force_sync):
+        super().__init__(patterns=["Items.data", "Devices.data"])
+        self.force_sync = force_sync
 
+    def on_modified(self, event: FileSystemEvent) -> None:
+        super().on_modified(event)
+        logging.info("Sending updates from: %s", event.src_path)
+        send_location_data(self.force_sync, event.src_path)
+
+
+def update_console(privacy, refresh_interval):
     console = Console()
     with console.status(f"[bold green]Synchronizing {len(device_updates)} devices ") as status:
         while True:
-            send_location_data(force_sync, cache_file_location_items)
-            send_location_data(force_sync, cache_file_location_devices)
-
             os.system('clear')
 
             if not privacy:
@@ -165,13 +181,31 @@ def scan_cache(privacy, force_sync, scan_interval, findmy_data_dir):
                 device_table.add_column("Device")
                 device_table.add_column("Last Update")
                 device_table.add_column("Location")
-                for device, details in sorted(device_updates.items(), key=lambda x: get_time(x[1][0])):
-                    device_table.add_row(device, get_time(details[0]), details[1])
+                for device_key, device in sorted(device_updates.items(), key=lambda x: x[0]):
+                    device_table.add_row(device_key,
+                                         get_time(device.last_update),
+                                         f"{device.latitude}, {device.longitude}")
                 console.print(device_table)
 
-            status.update(f"[bold green]Synchronizing {len(device_updates)} devices")
+            status.update(get_status_message())
 
-            time.sleep(scan_interval)
+            time.sleep(refresh_interval)
+
+
+def get_status_message():
+    if client.is_connected():
+        return f"[bold green]Synchronizing {len(device_updates)} devices"
+    return "[bold red]Client is disconnected"
+
+
+def start_file_watch(findmy_data_dir, force_sync) -> Observer:
+    send_location_data(force_sync, os.path.join(findmy_data_dir, "Items.data"))
+    send_location_data(force_sync, os.path.join(findmy_data_dir, "Devices.data"))
+    event_handler = FindMyFileHandler(force_sync)
+    observer = Observer()
+    observer.schedule(event_handler, findmy_data_dir)
+    observer.start()
+    return observer
 
 
 @click.command("home-assistant-findmy", no_args_is_help=True)
@@ -197,19 +231,27 @@ def scan_cache(privacy, force_sync, scan_interval, findmy_data_dir):
               envvar='MQTT_CLIENT_PASSWORD',
               required=True,
               help="[WARNING] Set this via environment variable! MQTT client password.")
-@click.option('--scan-interval',
-              envvar='FINDMY_FILE_SCAN_INTERVAL',
+@click.option('--refresh-interval',
+              envvar='FINDMY_REFRESH_INTERVAL',
               default=5,
               type=int,
-              help="File scan interval in seconds.")
+              help="Refresh console interval in seconds.")
 @click.option('--findmy-data-dir', '-f',
               type=click.Path(),
               default=os.path.expanduser('~') + '/Library/Caches/com.apple.findmy.fmipcore/',
               required=False,
               help='Path to findmy data (for testing)')
-def main(privacy, force_sync, ip, port, username, password, scan_interval, findmy_data_dir):
-    connect_broker(username, password, ip, port)
-    scan_cache(privacy, force_sync, scan_interval, findmy_data_dir)
+def main(privacy, force_sync, ip, port, username, password, refresh_interval, findmy_data_dir):
+    observer = None
+    try:
+        connect_broker(username, password, ip, port)
+        observer = start_file_watch(findmy_data_dir, force_sync)
+        update_console(privacy, refresh_interval)
+    finally:
+        client.loop_stop()
+        if observer:
+            observer.stop()
+            observer.join()
 
 
 if __name__ == '__main__':
