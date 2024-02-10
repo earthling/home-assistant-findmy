@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-import typing
 # .                                       .           .                   .
 # |                                 o     |           |        ,- o       |          
 # |-. ,-. ;-.-. ,-. --- ,-: ,-. ,-. . ,-. |-  ,-: ;-. |-  ---  |  . ;-. ,-| ;-.-. . .
@@ -34,6 +33,8 @@ import click
 import paho.mqtt.client as mqtt
 import os
 import json
+import typing
+
 from unidecode import unidecode
 from dotenv import load_dotenv
 from rich.console import Console
@@ -41,9 +42,6 @@ from rich.table import Table
 
 load_dotenv()
 
-DEFAULT_TOLERANCE = 70  # meters
-
-known_locations = {}
 device_updates = {}
 
 client = mqtt.Client("ha-client")
@@ -60,10 +58,6 @@ def get_time(timestamp):
     if type(timestamp) is not int:
         return "unknown"
     return str(datetime.fromtimestamp(timestamp / 1000))
-
-
-def get_lat_lng_approx(meters):
-    return meters / 111111
 
 
 def load_data(data_file):
@@ -87,18 +81,6 @@ def get_source_type(apple_position_type):
     return switcher.get(apple_position_type, "gps")
 
 
-def get_location_name(pos):
-    if len(known_locations) == 0:
-        return "unknown"
-
-    for name, location in known_locations.items():
-        tolerance = get_lat_lng_approx(location['tolerance'] or DEFAULT_TOLERANCE)
-        if (math.isclose(location['latitude'], pos[0], abs_tol=tolerance) and
-                math.isclose(location['longitude'], pos[1], abs_tol=tolerance)):
-            return name
-    return "not_home"
-
-
 class Device(object):
     def __init__(self, device: typing.Dict):
         self.name = device['name']
@@ -114,7 +96,6 @@ class Device(object):
             self.longitude = location['longitude']
             self.address = device['address']
             self.accuracy = math.sqrt(location['horizontalAccuracy'] ** 2 + location['verticalAccuracy'] ** 2)
-            self.location_name = get_location_name((self.latitude, self.longitude))
             self.last_update = location['timeStamp']
 
         self.id = get_device_id(self.name)
@@ -172,9 +153,7 @@ def scan_cache(privacy, force_sync, scan_interval, findmy_data_dir):
     cache_file_location_devices = findmy_data_dir + 'Devices.data'
 
     console = Console()
-    with console.status(
-            f"[bold green]Synchronizing {len(device_updates)} devices "
-            f"and {len(known_locations)} known locations") as status:
+    with console.status(f"[bold green]Synchronizing {len(device_updates)} devices ") as status:
         while True:
             send_location_data(force_sync, cache_file_location_items)
             send_location_data(force_sync, cache_file_location_devices)
@@ -190,55 +169,12 @@ def scan_cache(privacy, force_sync, scan_interval, findmy_data_dir):
                     device_table.add_row(device, get_time(details[0]), details[1])
                 console.print(device_table)
 
-            status.update(
-                f"[bold green]Synchronizing {len(device_updates)} devices and {len(known_locations)} known locations")
+            status.update(f"[bold green]Synchronizing {len(device_updates)} devices")
 
             time.sleep(scan_interval)
 
 
-def validate_param_locations(_, __, path):
-    if not path:
-        return {}
-
-    if not os.path.isfile(path):
-        raise click.BadParameter('The provided path is not a file.')
-
-    with open(path, 'r') as f:
-        try:
-            locations = json.load(f)
-        except json.JSONDecodeError:
-            raise click.BadParameter('The provided file does not contain valid JSON data.')
-
-    if not isinstance(locations, dict):
-        raise click.BadParameter('The provided file does not contain a valid JSON object.')
-
-    for name, location in locations.items():
-        if not isinstance(name, str):
-            raise click.BadParameter(f'The location name "{name}" is not a string.')
-        if not isinstance(location, dict):
-            raise click.BadParameter(f'The location "{name}" is not a valid JSON object.')
-        if not isinstance(location.get('latitude'), float):
-            raise click.BadParameter(f'The location "{name}" does not contain a valid latitude.')
-        if not isinstance(location.get('longitude'), float):
-            raise click.BadParameter(f'The location "{name}" does not contain a valid longitude.')
-        if not isinstance(location.get('tolerance'), int):
-            raise click.BadParameter(f'The location "{name}" does not contain a valid tolerance in meters.')
-
-    return path, locations
-
-
-def set_known_locations(locations):
-    global known_locations
-    _path, _known_locations = locations
-    known_locations = _known_locations
-
-
 @click.command("home-assistant-findmy", no_args_is_help=True)
-@click.option('--locations', '-l',
-              type=click.Path(),
-              callback=validate_param_locations,
-              required=False,
-              help='Path to the known locations JSON configuration file')
 @click.option('--privacy', '-p',
               is_flag=True,
               help='Hides specific device data from the console output')
@@ -271,10 +207,8 @@ def set_known_locations(locations):
               default=os.path.expanduser('~') + '/Library/Caches/com.apple.findmy.fmipcore/',
               required=False,
               help='Path to findmy data (for testing)')
-def main(locations, privacy, force_sync, ip, port, username, password, scan_interval, findmy_data_dir):
+def main(privacy, force_sync, ip, port, username, password, scan_interval, findmy_data_dir):
     connect_broker(username, password, ip, port)
-    if locations:
-        set_known_locations(locations)
     scan_cache(privacy, force_sync, scan_interval, findmy_data_dir)
 
 
